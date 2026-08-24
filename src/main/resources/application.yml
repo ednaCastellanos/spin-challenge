@@ -1,0 +1,122 @@
+spring:
+  application:
+    name: transaction-execution-api
+  profiles:
+    default: local
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:transactions}
+    username: ${DB_USER:spin}
+    password: ${DB_PASSWORD:spin}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 3000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate      # Flyway es el dueño del esquema. Nunca 'update'.
+    open-in-view: false       # evita conexiones abiertas durante la serialización
+    properties:
+      hibernate.jdbc.batch_size: 50
+      hibernate.order_inserts: true
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 500ms
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:29092}
+    producer:
+      acks: all
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true
+        spring.json.add.type.headers: false
+    consumer:
+      group-id: transaction-retry-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.trusted.packages: mx.spin.transactions.adapter.in.messaging.dto
+        spring.json.value.default.type: mx.spin.transactions.adapter.in.messaging.dto.TransactionRetryMessage
+    listener:
+      ack-mode: record
+
+server:
+  port: 8080
+  shutdown: graceful
+
+# ── Configuración propia de la aplicación ─────────────────────────
+app:
+  kafka:
+    retry-topic: transactions.retry
+    partitions: 6
+  provider:
+    base-url: ${PROVIDER_URL:http://localhost:3001}
+    execute-path: /provider/v1/execute
+    connect-timeout: 1s
+    read-timeout: 2s
+  idempotency:
+    ttl: 24h
+  security:
+    jwt:
+      secret: ${JWT_SECRET:change-me-this-is-a-dev-only-secret-of-32-bytes-min}
+      expiration: 1h
+
+# ── Resiliencia: cubre los MILISEGUNDOS. Kafka cubre los MINUTOS. ──
+resilience4j:
+  circuitbreaker:
+    instances:
+      paymentProvider:
+        sliding-window-size: 20
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Un rechazo de negocio NO debe abrir el circuito.
+        ignore-exceptions:
+          - mx.spin.transactions.domain.exception.ProviderRejectedException
+  retry:
+    instances:
+      paymentProvider:
+        max-attempts: 2
+        wait-duration: 200ms
+        exponential-backoff-multiplier: 2
+        ignore-exceptions:
+          - mx.spin.transactions.domain.exception.ProviderRejectedException
+  timelimiter:
+    instances:
+      paymentProvider:
+        timeout-duration: 2s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+
+logging:
+  level:
+    mx.spin.transactions: DEBUG

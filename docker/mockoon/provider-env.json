@@ -1,0 +1,172 @@
+{
+  "uuid": "b1f0c2a4-1111-4a11-9c11-000000000001",
+  "lastMigration": 32,
+  "name": "Spin Payment Provider Mock",
+  "endpointPrefix": "provider/v1",
+  "latency": 0,
+  "port": 3001,
+  "hostname": "",
+  "folders": [],
+  "routes": [
+    {
+      "uuid": "b1f0c2a4-2222-4a22-9c22-000000000002",
+      "type": "http",
+      "documentation": "Execute transaction",
+      "method": "post",
+      "endpoint": "execute",
+      "responses": [
+        {
+          "uuid": "r-000000000010",
+          "body": "{\n  \"status\": \"REJECTED\",\n  \"code\": \"INSUFFICIENT_FUNDS\",\n  \"message\": \"The account does not have enough balance to complete the transaction\"\n}",
+          "latency": 0,
+          "statusCode": 402,
+          "label": "Insufficient funds",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": false,
+          "crudKey": "id",
+          "callbacks": [],
+          "databucketID": "",
+          "filePath": "",
+          "sendFileAsBody": false,
+          "rules": [
+            {
+              "target": "body",
+              "modifier": "accountId",
+              "value": "acc-insufficient",
+              "invert": false,
+              "operator": "equals"
+            }
+          ]
+        },
+        {
+          "uuid": "r-000000000011",
+          "body": "{\n  \"status\": \"REJECTED\",\n  \"code\": \"ACCOUNT_BLOCKED\",\n  \"message\": \"The account is blocked\"\n}",
+          "latency": 0,
+          "statusCode": 403,
+          "label": "Account blocked",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": false,
+          "crudKey": "id",
+          "callbacks": [],
+          "databucketID": "",
+          "filePath": "",
+          "sendFileAsBody": false,
+          "rules": [
+            {
+              "target": "body",
+              "modifier": "accountId",
+              "value": "acc-blocked",
+              "invert": false,
+              "operator": "equals"
+            }
+          ]
+        },
+        {
+          "uuid": "r-000000000012",
+          "body": "{\n  \"status\": \"ERROR\",\n  \"code\": \"PROVIDER_UNAVAILABLE\",\n  \"message\": \"Internal provider error\"\n}",
+          "latency": 0,
+          "statusCode": 500,
+          "label": "Provider 5XX",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": false,
+          "crudKey": "id",
+          "callbacks": [],
+          "databucketID": "",
+          "filePath": "",
+          "sendFileAsBody": false,
+          "rules": [
+            {
+              "target": "body",
+              "modifier": "accountId",
+              "value": "acc-error",
+              "invert": false,
+              "operator": "equals"
+            }
+          ]
+        },
+        {
+          "uuid": "r-000000000013",
+          "body": "{\n  \"transactionId\": \"txn-{{faker 'string.alphanumeric' length=8}}\",\n  \"status\": \"APPROVED\",\n  \"balance\": 5500.00,\n  \"executedAt\": \"{{now 'yyyy-MM-dd[T]HH:mm:ss[Z]'}}\"\n}",
+          "latency": 5000,
+          "statusCode": 200,
+          "label": "Slow approval (timeout test)",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": false,
+          "crudKey": "id",
+          "callbacks": [],
+          "databucketID": "",
+          "filePath": "",
+          "sendFileAsBody": false,
+          "rules": [
+            {
+              "target": "body",
+              "modifier": "accountId",
+              "value": "acc-slow",
+              "invert": false,
+              "operator": "equals"
+            }
+          ]
+        },
+        {
+          "uuid": "r-000000000014",
+          "body": "{{setVar 'acct' (body 'accountId')}}{{setVar 'amt' (body 'amount')}}{{#unless (getGlobalVar @acct)}}{{setGlobalVar @acct (dataRaw 'seedBalances' 'default')}}{{/unless}}{{#if (eq (body 'type') 'CREDIT')}}{{setGlobalVar @acct (add (getGlobalVar @acct) @amt)}}{{else}}{{setGlobalVar @acct (subtract (getGlobalVar @acct) @amt)}}{{/if}}\n{\n  \"transactionId\": \"txn-{{faker 'string.alphanumeric' length=10}}\",\n  \"status\": \"APPROVED\",\n  \"balance\": {{getGlobalVar @acct}},\n  \"executedAt\": \"{{date now 'yyyy-MM-dd[T]HH:mm:ss[Z]'}}\"\n}",
+          "latency": 0,
+          "statusCode": 200,
+          "label": "Approved (default)",
+          "headers": [{ "key": "Content-Type", "value": "application/json" }],
+          "bodyType": "INLINE",
+          "rulesOperator": "OR",
+          "disableTemplating": false,
+          "fallbackTo404": false,
+          "default": true,
+          "crudKey": "id",
+          "callbacks": [],
+          "databucketID": "",
+          "filePath": "",
+          "sendFileAsBody": false,
+          "rules": []
+        }
+      ],
+      "responseMode": "None",
+      "streamingMode": null,
+      "streamingInterval": 0
+    }
+  ],
+  "rootChildren": [
+    { "type": "route", "uuid": "b1f0c2a4-2222-4a22-9c22-000000000002" }
+  ],
+  "proxyMode": false,
+  "proxyHost": "",
+  "proxyRemovePrefix": false,
+  "tlsOptions": { "enabled": false, "type": "CERT", "pfxPath": "", "certPath": "", "keyPath": "", "caPath": "", "passphrase": "" },
+  "cors": true,
+  "headers": [{ "key": "Content-Type", "value": "application/json" }],
+  "proxyReqHeaders": [{ "key": "", "value": "" }],
+  "proxyResHeaders": [{ "key": "", "value": "" }],
+  "data": [
+    {
+      "uuid": "db-0000000000001",
+      "id": "seed",
+      "name": "seedBalances",
+      "documentation": "Saldos iniciales. Se copian a global vars en la primera petición de cada cuenta.",
+      "value": "{\n  \"default\": 10000.00,\n  \"acc-123456\": 5000.00,\n  \"acc-vip\": 250000.00,\n  \"acc-low\": 75.50\n}"
+    }
+  ],
+  "callbacks": []
+}
