@@ -641,7 +641,7 @@ El enunciado plantea millones de transacciones diarias.
 - Servicio *stateless*: escala horizontalmente sin coordinación.
 - Particionado de Kafka por `accountId`: paralelismo sin perder orden por cuenta.
 
-**Documentado, no implementado** (sería sobre-ingeniería para el alcance del reto)
+**Documentado, no implementado** 
 
 - **Paginación por keyset (cursor).** `OFFSET 1000000` provoca un table scan. Con volúmenes reales, la paginación debería ir por cursor sobre `(created_at, id)`. Se implementó offset por simplicidad y compatibilidad con el contrato pedido (`page`, `limit`).
 - **Particionado de tabla por rango de `created_at`.** Estrategia natural de crecimiento; permite archivar particiones antiguas sin tocar las activas.
