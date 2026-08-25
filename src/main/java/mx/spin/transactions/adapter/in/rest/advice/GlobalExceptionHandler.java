@@ -1,7 +1,6 @@
 package mx.spin.transactions.adapter.in.rest.advice;
 
 import mx.spin.transactions.domain.exception.*;
-import mx.spin.transactions.domain.policy.RuleViolation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;

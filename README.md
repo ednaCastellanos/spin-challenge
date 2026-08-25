@@ -21,6 +21,7 @@ API REST para la ejecución y consulta de transacciones financieras (CREDIT / DE
 11. [Seguridad](#seguridad)
 12. [Estrategia de pruebas](#estrategia-de-pruebas)
 13. [Consideraciones de alto volumen](#consideraciones-de-alto-volumen)
+14. [Ejecutar la aplicación](#ejecutar-la-aplicación)
 14. [Despliegue](#despliegue)
 15. [CI/CD](#cicd)
 16. [Uso de Inteligencia Artificial](#uso-de-inteligencia-artificial)
@@ -641,7 +642,7 @@ El enunciado plantea millones de transacciones diarias.
 - Servicio *stateless*: escala horizontalmente sin coordinación.
 - Particionado de Kafka por `accountId`: paralelismo sin perder orden por cuenta.
 
-**Documentado, no implementado** 
+**Documentado, no implementado**
 
 - **Paginación por keyset (cursor).** `OFFSET 1000000` provoca un table scan. Con volúmenes reales, la paginación debería ir por cursor sobre `(created_at, id)`. Se implementó offset por simplicidad y compatibilidad con el contrato pedido (`page`, `limit`).
 - **Particionado de tabla por rango de `created_at`.** Estrategia natural de crecimiento; permite archivar particiones antiguas sin tocar las activas.
@@ -650,17 +651,51 @@ El enunciado plantea millones de transacciones diarias.
 
 ---
 
+## Ejecutar la aplicación
+
+**Todo en Docker:**
+```bash
+docker compose up -d --build
+```
+
+**O sólo la infraestructura, con la app local:**
+```bash
+ ./mvnw spring-boot:run
+```
+
 ## Despliegue
+
+### Estado de la entrega
+
+La infraestructura de despliegue está **escrita y validada, pero no desplegada a AWS**. Es una decisión de costos, no una omisión:
+
+| Componente | Costo real | Comentario |
+|---|---|---|
+| Control plane de EKS | `$0.10/hora` fijos (~$73/mes) | Se cobra desde que el clúster existe, corra o no algo dentro. Escalar los nodos a cero **no** lo evita |
+| Amazon MSK (Kafka) | ~$150/mes mínimo | **No tiene capa gratuita** de ningún tipo |
+| RDS + ElastiCache | ~$27/mes | Cubiertos por free tier durante 12 meses |
+
+Para una demostración de un challenge técnico, ese gasto no se justifica. Lo que sí se entrega es la configuración completa y correcta:
+
+```bash
+kubectl apply -k deploy/k8s/base --dry-run=client                                 # manifiestos válidos
+kubectl kustomize deploy/k8s/base | kubeconform -strict -summary                  # manifiestos renderizan
+jq empty deploy/ecs/task-definition.json                                          # task definition válida
+docker build -t spin-tx-api:local .                                               # imagen construible
+docker compose up -d --build                                                      # stack completo funcionando
+```
+
+El stack completo se ejecuta localmente con Docker Compose, que ejercita exactamente la misma imagen que se subiría a ECR. La diferencia entre el entorno local y el desplegado es dónde corren los contenedores y de dónde vienen los secretos, no qué corre.
 
 ### Dockerfile
 
-Multi-stage con tres etapas: build con Maven, extracción de capas de Spring Boot, y runtime sobre JRE 21 slim.
+Multi-stage con tres etapas: build con Maven, extracción de capas de Spring Boot, y runtime sobre JRE 21 slim (~230 MB final).
 
 Decisiones relevantes:
 
-- **Capas de Spring Boot** ordenadas por volatilidad: un cambio de código reconstruye sólo la capa `application` (~200 KB) en lugar de la imagen completa.
-- **Usuario no-root** y `readOnlyRootFilesystem` — requisito de cualquier política de seguridad de pods.
-- **`-XX:MaxRAMPercentage=75.0`** en lugar de `-Xmx` fijo, para que la JVM respete el límite del contenedor.
+- **Capas de Spring Boot** ordenadas por volatilidad: un cambio de código reconstruye sólo la capa `application` (~200 KB) en lugar de la imagen completa. Acelera builds y ahorra ancho de banda en cada push a ECR.
+- **Usuario no-root** y `readOnlyRootFilesystem` — requisito de cualquier política de seguridad de pods seria.
+- **`-XX:MaxRAMPercentage=75.0`** en lugar de `-Xmx` fijo, para que la JVM lea el límite del cgroup del contenedor en lugar de la memoria del host. Sin esto, la JVM dimensiona el heap contra la máquina completa y el contenedor muere por OOM.
 - `dependency:go-offline` en capa separada: las dependencias sólo se re-descargan si cambia el `pom.xml`.
 
 ### Kubernetes
@@ -675,21 +710,48 @@ deploy/k8s/base/
 └── kustomization.yaml
 ```
 
-`startupProbe` separado de `livenessProbe`: sin esa separación, o el liveness es tan laxo que no detecta cuelgues, o mata el pod durante el arranque de la JVM. Es el bucle de reinicios clásico en despliegues Java sobre Kubernetes.
+**`startupProbe` separado de `livenessProbe`** es el detalle que más importa aquí. Sin esa separación hay que elegir entre dos males: un liveness tan laxo que no detecta cuelgues reales, o uno que mata el pod durante el arranque de la JVM. El `startupProbe` da 150 segundos de gracia inicial y luego cede el control al liveness con un intervalo agresivo.
 
-Los secretos se declaran como plantilla. En producción irían por External Secrets Operator contra AWS Secrets Manager.
+Las probes tampoco son decorativas: `readiness` es lo que consulta el balanceador para decidir si un pod recibe tráfico. Un pod que falla readiness deja de recibir peticiones sin ser reiniciado — exactamente lo que se quiere durante un pico de carga o una reconexión a la base de datos.
+
+Los secretos se declaran como plantilla sin valores reales. En producción vendrían por External Secrets Operator contra AWS Secrets Manager.
 
 ### ECS Fargate
 
-`deploy/ecs/task-definition.json` con secretos referenciados desde Secrets Manager y logs a CloudWatch.
+`deploy/ecs/task-definition.json`, con secretos referenciados por ARN desde Secrets Manager y logs a CloudWatch.
+
+Se incluye ECS además de Kubernetes porque **es el destino que elegiría para este caso**: Fargate no cobra control plane, factura por consumo exacto de CPU y memoria del contenedor, y elimina la administración del sistema operativo. Los manifiestos de Kubernetes se entregan como alternativa portable entre nubes.
+
+La task definition distingue los dos roles de IAM, que suelen confundirse:
+
+| Rol | Quién lo usa | Para qué |
+|---|---|---|
+| `executionRoleArn` | El servicio ECS, **antes** de arrancar la app | Descargar la imagen de ECR, escribir logs, leer secretos |
+| `taskRoleArn` | La aplicación Java, **en runtime** | Llamar a otros servicios AWS desde el código |
 
 ### Terraform
 
-`deploy/terraform/` provisiona ECR (con política de retención de 5 imágenes) y el rol de OIDC para GitHub Actions.
+`deploy/terraform/` provisiona ECR (con política de retención de las últimas 5 imágenes) y el proveedor OIDC más el rol que asume GitHub Actions.
 
-**Nota de costos — decisión consciente:** EKS cobra `$0.10/hora` por el control plane desde que existe, corra o no algo dentro; escalar los nodos a cero no lo evita. Para una demostración, ECS Fargate no tiene cargo fijo. Por eso el Terraform provisiona ECR e IAM pero **no** el clúster: si se quiere EKS, `eksctl create cluster --fargate` lo levanta en un comando sin gestionar estado adicional, y los manifiestos de `deploy/k8s/` funcionan igual en ambos destinos.
+**No provisiona el clúster deliberadamente.** Crear un clúster EKS por Terraform implica gestionar estado de un recurso que cobra por existir; si se quiere levantar, `eksctl create cluster --fargate` lo hace en un comando sin estado que mantener, y los manifiestos de `deploy/k8s/` aplican igual.
 
-En el mismo sentido, Postgres, Redis y Kafka se despliegan dentro del clúster con volúmenes efímeros. RDS y sobre todo MSK (~$150/mes) consumirían los créditos rápidamente. En producción real irían gestionados.
+Para un despliegue real, Postgres y Redis irían a RDS y ElastiCache. Kafka es el caso difícil: MSK no tiene capa gratuita, así que la alternativa económica sería autohospedarlo en el clúster con volúmenes efímeros — aceptable para una demo, no para producción, donde la pérdida de mensajes de reintento significaría transacciones huérfanas.
+
+### Cómo se desplegaría
+
+```bash
+# 1. Infraestructura base
+cd deploy/terraform
+terraform init && terraform apply -var="github_repo=<owner>/<repo>"
+
+# 2. Registrar el rol de OIDC como secreto del repositorio
+#    GitHub → Settings → Secrets → AWS_ROLE_ARN = <output de terraform>
+
+# 3. Desplegar
+gh workflow run cd.yml -f target=ecs
+```
+
+El pipeline construye la imagen, la sube a ECR con el SHA del commit como tag, renderiza la task definition con esa imagen y actualiza el servicio esperando estabilidad.
 
 ---
 

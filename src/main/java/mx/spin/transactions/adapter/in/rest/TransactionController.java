@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
 import mx.spin.transactions.adapter.in.rest.dto.*;
 import mx.spin.transactions.adapter.in.rest.mapper.TransactionRestMapper;
 import mx.spin.transactions.application.port.in.ExecuteTransactionUseCase;
@@ -49,11 +50,12 @@ public class TransactionController {
     public ResponseEntity<TransactionResponse> execute(
             @Valid @RequestBody CreateTransactionRequest request,
             @Parameter(description = "Clave de idempotencia (UUID) generada por el cliente")
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+            @RequestHeader(value = "Idempotency-Key", required = false)
+            @Pattern(regexp = "^[0-9a-fA-F-]{36}$", message = "Idempotency-Key must be a UUID")
+            String idempotencyKey) {
 
         Transaction transaction = executeTransaction.execute(mapper.toCommand(request, idempotencyKey));
 
-        // PENDING -> 202: aceptada pero sin confirmación del proveedor.
         HttpStatus httpStatus = transaction.status() == TransactionStatus.PENDING
                 ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
 
