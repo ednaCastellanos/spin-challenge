@@ -1,0 +1,29 @@
+# Perfil de EKS. Solo overrides; el resto se hereda de application.yml.
+spring:
+  jpa:
+    properties:
+      hibernate.generate_statistics: false
+  kafka:
+    properties:
+      security.protocol: SASL_SSL
+      sasl.mechanism: AWS_MSK_IAM
+      sasl.jaas.config: software.amazon.msk.auth.iam.IAMLoginModule required;
+      sasl.client.callback.handler.class: software.amazon.msk.auth.iam.IAMClientCallbackHandler
+    producer:
+      retries: 5
+    listener:
+      concurrency: 3          # <= particiones del topic (6)
+
+# Actuator en puerto aparte: no queda expuesto detrás del ALB público.
+management:
+  server:
+    port: 8081
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: WARN
+    mx.spin.transactions: INFO
+    org.springframework.kafka: WARN

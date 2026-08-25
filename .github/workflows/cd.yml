@@ -1,0 +1,100 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # OIDC -> AWS (sin access keys)
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: spin-eks
+  K8S_NAMESPACE: spin
+  K8S_DEPLOYMENT: spin-transactions
+
+jobs:
+  preflight:
+    name: ¿AWS configurado?
+    runs-on: ubuntu-latest
+    outputs:
+      aws-ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -n "$ROLE_ARN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy omitido::No hay AWS_DEPLOY_ROLE_ARN; el pipeline queda listo pero no despliega."
+          fi
+
+  publish:
+    name: Build & push a ECR
+    needs: preflight
+    if: needs.preflight.outputs.aws-ready == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:$TAG"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  deploy-eks:
+    name: Deploy EKS
+    needs: [ preflight, publish ]
+    if: needs.preflight.outputs.aws-ready == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configurar kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Aplicar manifiestos con la imagen nueva
+        working-directory: deploy/k8s/overlays/prod
+        run: |
+          kustomize edit set image \
+            spin-transactions=${{ needs.publish.outputs.image }}
+          kubectl apply -k .
+
+      - name: Esperar rollout
+        run: |
+          kubectl -n "$K8S_NAMESPACE" rollout status \
+            deployment/"$K8S_DEPLOYMENT" --timeout=5m
+
+      - name: Rollback si falla
+        if: failure()
+        run: |
+          kubectl -n "$K8S_NAMESPACE" rollout undo \
+            deployment/"$K8S_DEPLOYMENT"

@@ -9,7 +9,7 @@ spring:
     username: ${DB_USER:spin}
     password: ${DB_PASSWORD:spin}
     hikari:
-      maximum-pool-size: 20
+      maximum-pool-size: ${DB_POOL_SIZE:20}
       minimum-idle: 5
       connection-timeout: 3000
 
@@ -57,6 +57,8 @@ spring:
 server:
   port: 8080
   shutdown: graceful
+
+spring.lifecycle.timeout-per-shutdown-phase: 25s
 
 # ── Configuración propia de la aplicación ─────────────────────────
 app:
@@ -111,6 +113,11 @@ management:
       show-details: when_authorized
       probes:
         enabled: true
+  health:
+    readinessstate:
+      enabled: true
+    livenessstate:
+      enabled: true
 
 springdoc:
   swagger-ui:
@@ -119,4 +126,4 @@ springdoc:
 
 logging:
   level:
-    mx.spin.transactions: DEBUG
+    mx.spin.transactions: ${LOG_LEVEL:INFO}

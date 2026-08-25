@@ -1,6 +1,25 @@
 name: spin-tx-api
 
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spin-app
+    ports: [ "8080:8080" ]
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      KAFKA_BROKERS: kafka:9092
+      PROVIDER_URL: http://mockoon:3001
+      JWT_SECRET: ${JWT_SECRET:-local-dev-secret-please-change-me-32b}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      mockoon: { condition: service_started }
+
   postgres:
     image: postgres:16-alpine
     container_name: spin-postgres

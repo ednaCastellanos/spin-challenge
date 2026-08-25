@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spin-transactions-config
+data:
+  SPRING_PROFILES_ACTIVE: "prod"
+  DB_HOST: "spin-db.xxxx.us-east-1.rds.amazonaws.com"
+  DB_PORT: "5432"
+  DB_NAME: "transactions"
+  DB_POOL_SIZE: "10"
+  REDIS_HOST: "spin-redis.xxxx.cache.amazonaws.com"
+  REDIS_PORT: "6379"
+  KAFKA_BROKERS: "b-1.spin-msk...:9098,b-2.spin-msk...:9098"
+  PROVIDER_URL: "http://provider.spin.svc.cluster.local:3001"

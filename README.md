@@ -665,95 +665,107 @@ docker compose up -d --build
 
 ## Despliegue
 
-### Estado de la entrega
-
-La infraestructura de despliegue está **escrita y validada, pero no desplegada a AWS**. Es una decisión de costos, no una omisión:
-
-| Componente | Costo real | Comentario |
-|---|---|---|
-| Control plane de EKS | `$0.10/hora` fijos (~$73/mes) | Se cobra desde que el clúster existe, corra o no algo dentro. Escalar los nodos a cero **no** lo evita |
-| Amazon MSK (Kafka) | ~$150/mes mínimo | **No tiene capa gratuita** de ningún tipo |
-| RDS + ElastiCache | ~$27/mes | Cubiertos por free tier durante 12 meses |
-
-Para una demostración de un challenge técnico, ese gasto no se justifica. Lo que sí se entrega es la configuración completa y correcta:
+### Local (docker-compose)
 
 ```bash
-kubectl apply -k deploy/k8s/base --dry-run=client                                 # manifiestos válidos
-kubectl kustomize deploy/k8s/base | kubeconform -strict -summary                  # manifiestos renderizan
-jq empty deploy/ecs/task-definition.json                                          # task definition válida
-docker build -t spin-tx-api:local .                                               # imagen construible
-docker compose up -d --build                                                      # stack completo funcionando
+docker compose up -d
+./mvnw spring-boot:run
 ```
 
-El stack completo se ejecuta localmente con Docker Compose, que ejercita exactamente la misma imagen que se subiría a ECR. La diferencia entre el entorno local y el desplegado es dónde corren los contenedores y de dónde vienen los secretos, no qué corre.
+Levanta Postgres, Redis, Kafka (KRaft) y Mockoon. La API queda en
+`http://localhost:8080`, Swagger en `/swagger-ui.html`.
 
-### Dockerfile
+### Producción: AWS EKS
 
-Multi-stage con tres etapas: build con Maven, extracción de capas de Spring Boot, y runtime sobre JRE 21 slim (~230 MB final).
+El despliegue está resuelto con **Kubernetes sobre EKS**, manifiestos en
+`k8s/` organizados con Kustomize (`base/` + `overlays/prod/`).
 
-Decisiones relevantes:
+#### Por qué EKS y no ECS Fargate
 
-- **Capas de Spring Boot** ordenadas por volatilidad: un cambio de código reconstruye sólo la capa `application` (~200 KB) en lugar de la imagen completa. Acelera builds y ahorra ancho de banda en cada push a ECR.
-- **Usuario no-root** y `readOnlyRootFilesystem` — requisito de cualquier política de seguridad de pods seria.
-- **`-XX:MaxRAMPercentage=75.0`** en lugar de `-Xmx` fijo, para que la JVM lea el límite del cgroup del contenedor en lugar de la memoria del host. Sin esto, la JVM dimensiona el heap contra la máquina completa y el contenedor muere por OOM.
-- `dependency:go-offline` en capa separada: las dependencias sólo se re-descargan si cambia el `pom.xml`.
+Ambas opciones resuelven el problema. Elegí EKS por tres razones ligadas a
+este servicio en particular:
 
-### Kubernetes
+1. **Autoescalado por métrica de negocio.** El challenge plantea millones de
+   transacciones diarias con picos. El HPA de Kubernetes permite escalar por
+   CPU hoy y migrar a *lag* del consumer group de Kafka mañana (vía KEDA) sin
+   cambiar la plataforma. En ECS eso implica métricas custom en CloudWatch.
+2. **Portabilidad.** Los manifiestos corren igual en EKS, en `kind` local o en
+   otro cloud. No hay *lock-in* en el formato de despliegue.
+3. **Consistencia con el stack de Spin**, que ya incluye Kubernetes.
 
-```
-deploy/k8s/base/
-├── deployment.yaml   # probes, resources, securityContext
-├── service.yaml
-├── configmap.yaml
-├── secret.example.yaml
-├── hpa.yaml
-└── kustomization.yaml
-```
+El costo es mayor complejidad operativa: EKS requiere administrar el control
+plane, el AWS Load Balancer Controller y los add-ons. Para un servicio único,
+ECS Fargate sería la opción más pragmática. Documento la decisión así porque
+la respuesta correcta depende del contexto del equipo, no del servicio.
 
-**`startupProbe` separado de `livenessProbe`** es el detalle que más importa aquí. Sin esa separación hay que elegir entre dos males: un liveness tan laxo que no detecta cuelgues reales, o uno que mata el pod durante el arranque de la JVM. El `startupProbe` da 150 segundos de gracia inicial y luego cede el control al liveness con un intervalo agresivo.
+#### Componentes desplegados
 
-Las probes tampoco son decorativas: `readiness` es lo que consulta el balanceador para decidir si un pod recibe tráfico. Un pod que falla readiness deja de recibir peticiones sin ser reiniciado — exactamente lo que se quiere durante un pico de carga o una reconexión a la base de datos.
+| Recurso | Propósito |
+|---|---|
+| `Deployment` | 3 réplicas, rolling update con `maxUnavailable: 0` |
+| `HorizontalPodAutoscaler` | 3→20 pods al 65% de CPU |
+| `PodDisruptionBudget` | Mínimo 2 pods durante drenados de nodo |
+| `Service` (ClusterIP) + `Ingress` (ALB) | Exposición HTTPS vía ACM |
+| `ServiceAccount` con IRSA | Credenciales AWS sin llaves estáticas |
+| `ExternalSecret` | Sincroniza secretos desde AWS Secrets Manager |
 
-Los secretos se declaran como plantilla sin valores reales. En producción vendrían por External Secrets Operator contra AWS Secrets Manager.
+Servicios gestionados fuera del clúster: **RDS Postgres**, **ElastiCache Redis**
+y **MSK** (Kafka con autenticación IAM, puerto 9098).
 
-### ECS Fargate
+#### Decisiones de resiliencia en el manifiesto
 
-`deploy/ecs/task-definition.json`, con secretos referenciados por ARN desde Secrets Manager y logs a CloudWatch.
+- **`preStop: sleep 10`** — el ALB tarda en desregistrar el target. Sin esta
+  espera se pierden transacciones en vuelo en cada despliegue.
+- **`terminationGracePeriodSeconds: 45`** — cubre el `preStop` más el tiempo
+  de drenado del consumer de Kafka.
+- **`startupProbe` separada de `readinessProbe`** — el arranque de Spring Boot
+  con Flyway puede tardar; sin ella, la liveness mataría el pod en el boot.
+- **`readOnlyRootFilesystem` + `runAsNonRoot` + `drop: ALL`** — el contenedor
+  solo escribe en `/tmp`, montado como `emptyDir`.
+- **`topologySpreadConstraints`** — distribuye réplicas entre zonas de
+  disponibilidad.
 
-Se incluye ECS además de Kubernetes porque **es el destino que elegiría para este caso**: Fargate no cobra control plane, factura por consumo exacto de CPU y memoria del contenedor, y elimina la administración del sistema operativo. Los manifiestos de Kubernetes se entregan como alternativa portable entre nubes.
+#### Cómo desplegar
 
-La task definition distingue los dos roles de IAM, que suelen confundirse:
+El pipeline (`.github/workflows/cd.yml`) se dispara en `main`, tags `v*` o
+manualmente. Autentica contra AWS por **OIDC**, sin access keys almacenadas.
 
-| Rol | Quién lo usa | Para qué |
-|---|---|---|
-| `executionRoleArn` | El servicio ECS, **antes** de arrancar la app | Descargar la imagen de ECR, escribir logs, leer secretos |
-| `taskRoleArn` | La aplicación Java, **en runtime** | Llamar a otros servicios AWS desde el código |
+Requisito único: el secret de repositorio `AWS_DEPLOY_ROLE_ARN`. Si no está
+configurado, los jobs de deploy se **omiten** en vez de fallar — el pipeline
+queda listo pero inerte hasta que exista la infraestructura.
 
-### Terraform
-
-`deploy/terraform/` provisiona ECR (con política de retención de las últimas 5 imágenes) y el proveedor OIDC más el rol que asume GitHub Actions.
-
-**No provisiona el clúster deliberadamente.** Crear un clúster EKS por Terraform implica gestionar estado de un recurso que cobra por existir; si se quiere levantar, `eksctl create cluster --fargate` lo hace en un comando sin estado que mantener, y los manifiestos de `deploy/k8s/` aplican igual.
-
-Para un despliegue real, Postgres y Redis irían a RDS y ElastiCache. Kafka es el caso difícil: MSK no tiene capa gratuita, así que la alternativa económica sería autohospedarlo en el clúster con volúmenes efímeros — aceptable para una demo, no para producción, donde la pérdida de mensajes de reintento significaría transacciones huérfanas.
-
-### Cómo se desplegaría
+Despliegue manual:
 
 ```bash
-# 1. Infraestructura base
-cd deploy/terraform
-terraform init && terraform apply -var="github_repo=<owner>/<repo>"
-
-# 2. Registrar el rol de OIDC como secreto del repositorio
-#    GitHub → Settings → Secrets → AWS_ROLE_ARN = <output de terraform>
-
-# 3. Desplegar
-gh workflow run cd.yml -f target=ecs
+aws eks update-kubeconfig --name spin-eks --region us-east-1
+cd k8s/overlays/prod
+kustomize edit set image spin-transactions=<ECR_URI>:<TAG>
+kubectl apply -k .
+kubectl -n spin rollout status deployment/spin-transactions
 ```
 
-El pipeline construye la imagen, la sube a ECR con el SHA del commit como tag, renderiza la task definition con esa imagen y actualiza el servicio esperando estabilidad.
+Rollback:
 
----
+```bash
+kubectl -n spin rollout undo deployment/spin-transactions
+```
+
+El pipeline ejecuta este `rollout undo` automáticamente si el rollout no
+estabiliza en 5 minutos.
+
+#### Estado actual
+
+Los manifiestos y el pipeline están **escritos y versionados, pero no
+ejecutados contra un clúster real**: no aprovisioné la cuenta de AWS para este
+challenge. Lo incluyo porque forma parte de cómo entregaría este servicio a
+producción, y prefiero declarar el alcance real a presentarlo como validado.
+
+Pendientes para un despliegue efectivo:
+
+- Terraform del clúster, RDS, ElastiCache, MSK y los roles IRSA.
+- Instalación de AWS Load Balancer Controller y External Secrets Operator.
+- Sustituir Mockoon por el proveedor real (`PROVIDER_BASE_URL` en el ConfigMap).
+- Observabilidad: Prometheus scrapeando `/actuator/prometheus`.
 
 ## CI/CD
 

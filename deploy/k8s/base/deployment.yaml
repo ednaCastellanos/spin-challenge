@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spin-transactions
+  labels: { app: spin-transactions }
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: spin-transactions }
+  template:
+    metadata:
+      labels: { app: spin-transactions }
+    spec:
+      serviceAccountName: spin-transactions
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: spin-transactions }
+      containers:
+        - name: app
+          image: spin-transactions   # kustomize inyecta el tag real
+          ports:
+            - { name: http, containerPort: 8080 }
+          envFrom:
+            - configMapRef: { name: spin-transactions-config }
+            - secretRef:    { name: spin-transactions-secrets }
+          env:
+            - name: JAVA_OPTS
+              value:  "-XX:MaxRAMPercentage=70.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp"
+          resources:
+            requests: { cpu: "500m", memory: "768Mi" }
+            limits:   { memory: "1Gi" }
+          startupProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 15
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "10"] }   # drena el ALB antes de morir
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 45
